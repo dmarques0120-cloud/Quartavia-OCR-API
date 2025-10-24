@@ -23,8 +23,8 @@ load_dotenv()
 
 # --- Configuração ---
 app = FastAPI(
-    title="API Rápida de Extratos (Versão OpenAI c/ Webhook)",
-    description="Substitui o CrewAI por um pipeline otimizado para < 15s."
+    title="Quartavia OCR API",
+    description="v1 - Processamento com Paralelismo e Webhook"
 )
 
 # --- Configuração OpenAI ---
@@ -482,7 +482,7 @@ async def processar_e_enviar_webhook(file_url: str, webhook_url: str):
 async def processar_extrato_endpoint(file: UploadFile = File(...)):
     """
     Recebe um PDF via upload de arquivo (form-data), 
-    executa o pipeline otimizado e retorna o JSON (SÍNCRONO).
+    executa o pipeline otimizado e retorna o JSON
     """
     print(f"INFO: Recebido arquivo: {file.filename}")
     pdf_bytes = await file.read()
@@ -494,7 +494,7 @@ async def processar_extrato_endpoint(file: UploadFile = File(...)):
 async def processar_extrato_url_endpoint(payload: URLPayload, background_tasks: BackgroundTasks):
     """
     Recebe um JSON com uma 'file_url' e 'webhook_url',
-    inicia o processamento em background e retorna resposta imediata (ASSÍNCRONO).
+    inicia o processamento em background e retorna as transações
     """
     print(f"INFO: Recebida requisição de URL: {payload.file_url}")
     print(f"INFO: Webhook será enviado para: {payload.webhook_url}")
