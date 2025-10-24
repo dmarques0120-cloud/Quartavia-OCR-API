@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: quartavia-ocr-api
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python api_rapida.py
+    envVars:
+      - key: MODEL_OPENAI
+        value: gpt-4o-mini
+      - key: OPENAI_API_KEY
+        sync: false  # Será configurado manualmente no painel
+      - key: MISTRAL_API_KEY
+        sync: false  # Será configurado manualmente no painel

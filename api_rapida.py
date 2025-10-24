@@ -513,10 +513,14 @@ async def processar_extrato_url_endpoint(payload: URLPayload, background_tasks: 
     )
 
 
-# --- Para executar localmente ---
+# --- Para executar localmente ou em produção ---
 if __name__ == "__main__":
-    print("Iniciando servidor FastAPI em http://127.0.0.1:8000")
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # Porta dinâmica para Render ou porta fixa para desenvolvimento local
+    port = int(os.getenv("PORT", 8000))
+    host = "0.0.0.0"  # Permite conexões externas (necessário para Render)
+    
+    print(f"Iniciando servidor FastAPI em {host}:{port}")
+    uvicorn.run(app, host=host, port=port)
 
 
 
