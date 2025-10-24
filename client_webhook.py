@@ -116,7 +116,7 @@ async def main():
     WEBHOOK_URL_PUBLICA = "https://stephaine-hyperbolic-intelligibly.ngrok-free.dev/webhook-receiver"
 
     # Substitua por uma URL de um PDF de teste online
-    PDF_DE_TESTE_URL = "https://uugjjiacxcqcpayzpthl.supabase.co/storage/v1/object/public/quartavia/uploads/1761175054_Extrato-21-09-2025-a-21-10-2025-PDF.pdf" 
+    PDF_DE_TESTE_URL = "https://uugjjiacxcqcpayzpthl.supabase.co/storage/v1/object/public/quartavia/uploads/1761229557_Picpay.pdf" 
     # (Use um dos seus extratos em um S3 ou link público)
 
     if "COLE-SUA-URL" in WEBHOOK_URL_PUBLICA:

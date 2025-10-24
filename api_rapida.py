@@ -237,7 +237,7 @@ def consolidar_resultados_chunks(resultados_chunks: list[dict]) -> dict:
     todas_transacoes = []
     bank_name = "TBD"
     document_type = "unknown"
-    erros = []
+    erros_reais = []  # Apenas erros de processamento, não de "nenhuma transação"
     
     for resultado in resultados_chunks:
         if resultado.get("success", False):
@@ -250,8 +250,10 @@ def consolidar_resultados_chunks(resultados_chunks: list[dict]) -> dict:
             if document_type == "unknown" and resultado.get("document_type"):
                 document_type = resultado["document_type"]
         else:
+            # Só inclui erros que NÃO são "Nenhuma transação encontrada"
             erro = resultado.get("error_message", "Erro desconhecido")
-            erros.append(erro)
+            if "Nenhuma transação encontrada" not in erro:
+                erros_reais.append(erro)
     
     # Remove transações duplicadas baseado em data, descrição e valor
     transacoes_unicas = []
@@ -265,13 +267,24 @@ def consolidar_resultados_chunks(resultados_chunks: list[dict]) -> dict:
             transacoes_vistas.add(chave)
             transacoes_unicas.append(transacao)
     
+    # Define error_message apenas se não há transações E há erros reais
+    error_message = None
+    if len(transacoes_unicas) == 0:
+        if erros_reais:
+            error_message = "; ".join(erros_reais)
+        else:
+            error_message = "Nenhuma transação encontrada no documento"
+    elif erros_reais:
+        # Se há transações mas também erros reais, inclui os erros
+        error_message = "; ".join(erros_reais)
+    
     resultado_final = {
         "success": len(transacoes_unicas) > 0,
         "bank_name": bank_name,
         "document_type": document_type,
         "transactions_count": len(transacoes_unicas),
         "transactions": transacoes_unicas,
-        "error_message": "; ".join(erros) if erros else None
+        "error_message": error_message
     }
     
     return resultado_final
