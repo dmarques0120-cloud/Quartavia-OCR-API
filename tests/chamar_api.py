@@ -5,20 +5,21 @@ import json
 # CONFIGURAÇÃO
 # ========================================
 
-API_URL = "https://quartavia-ocr-api.onrender.com"
+API_URL = "http://localhost:8000/"
 ENDPOINT = "/processar-extrato-url/"
 
 # URLs para teste
 FILE_URL = "https://uugjjiacxcqcpayzpthl.supabase.co/storage/v1/object/public/quartavia/uploads/1761229240_Btg.pdf"
 WEBHOOK_URL = "https://webhook.site/175bdbcb-1164-4523-a1ed-0374bf059a61"  # Substitua por uma URL real
 
-def chamar_api_assincrona(file_url, webhook_url):
+def chamar_api_assincrona(file_url, webhook_url, user_id=1):
     """
     Chama a API assíncrona do Quartavia OCR
     
     Args:
         file_url (str): URL do arquivo PDF para processar
         webhook_url (str): URL do webhook para receber o resultado
+        user_id (int): ID do usuário para categorizações personalizadas
     
     Returns:
         dict: Resposta da API
@@ -30,7 +31,8 @@ def chamar_api_assincrona(file_url, webhook_url):
     # Payload da requisição
     payload = {
         "file_url": file_url,
-        "webhook_url": webhook_url
+        "webhook_url": webhook_url,
+        "user_id": user_id
     }
     
     # Headers
@@ -108,8 +110,8 @@ def main():
     print("🎯 SCRIPT DE CHAMADA - QUARTAVIA OCR API")
     print("=" * 60)
     
-    # Fazer a chamada
-    resultado = chamar_api_assincrona(FILE_URL, WEBHOOK_URL)
+    # Fazer a chamada (exemplo com user_id=123)
+    resultado = chamar_api_assincrona(FILE_URL, WEBHOOK_URL, user_id=1)
     
     print("\n" + "=" * 60)
     print("📋 RESULTADO FINAL:")

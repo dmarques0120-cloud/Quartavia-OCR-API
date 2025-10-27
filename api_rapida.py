@@ -5,6 +5,7 @@ import io
 import time
 import json
 import base64
+import re
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -18,6 +19,9 @@ import fitz  # PyMuPDF
 # --- Módulos de Prompt e API ---
 import httpx # Biblioteca HTTP assíncrona moderna (ainda necessária para baixar a URL)
 from prompt_e_schema import PROMPT_SISTEMA, CATEGORIAS_COMPLETAS
+
+# --- Supabase ---
+from supabase import create_client, Client
 
 load_dotenv()
 
@@ -35,6 +39,16 @@ if not OPENAI_API_KEY:
 
 MODEL_OPENAI = os.getenv("MODEL_OPENAI") # gpt-4o é o mais rápido e eficiente para visão e texto
 
+# --- Configuração Supabase ---
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    print("AVISO: Variáveis do Supabase não configuradas. Funcionalidade de categorização personalizada desabilitada.")
+    supabase = None
+else:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 # Cliente HTTP assíncrono (para baixar PDFs da URL e enviar webhooks)
 http_client = httpx.AsyncClient(timeout=30.0)
 # Cliente Async da OpenAI
@@ -45,6 +59,127 @@ openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0)
 class URLPayload(BaseModel):
     file_url: str
     webhook_url: str # NOVO: URL para enviar o resultado final
+    user_id: int  # NOVO: ID do usuário
+
+class FilePayload(BaseModel):
+    user_id: int  # NOVO: Para o endpoint de upload direto
+
+
+# --- NOVA FUNÇÃO: Buscar categorizações personalizadas ---
+async def buscar_categorizacoes_usuario(user_id: int) -> dict[str, dict]:
+    """
+    Busca todas as categorizações personalizadas do usuário no Supabase.
+    Retorna um dicionário com treated_name como chave e {category, subcategory} como valor.
+    """
+    if not supabase:
+        return {}
+    
+    try:
+        print(f"DEBUG: Buscando categorizações para usuário {user_id}...")
+        
+        response = supabase.table("Transactions").select("treated_name, category, subcategory").eq("id", user_id).execute()
+        
+        categorizacoes = {}
+        for item in response.data:
+            treated_name = item.get("treated_name", "").strip().lower()
+            if treated_name:
+                categorizacoes[treated_name] = {
+                    "categoria": item.get("category", ""),
+                    "subcategoria": item.get("subcategory", "")
+                }
+        
+        print(f"DEBUG: Encontradas {len(categorizacoes)} categorizações personalizadas.")
+        return categorizacoes
+        
+    except Exception as e:
+        print(f"ERRO ao buscar categorizações do usuário: {e}")
+        return {}
+
+# --- NOVA FUNÇÃO: Aplicar categorizações personalizadas ---
+def aplicar_categorizacoes_personalizadas(transacoes: list[dict], categorizacoes_usuario: dict[str, dict]) -> tuple[list[dict], list[dict]]:
+    """
+    Aplica categorizações personalizadas às transações e separa as que precisam ser inseridas.
+    Retorna: (transacoes_atualizadas, transacoes_para_inserir)
+    """
+    if not categorizacoes_usuario:
+        return transacoes, transacoes
+    
+    transacoes_atualizadas = []
+    transacoes_para_inserir = []
+    
+    print(f"DEBUG: Aplicando categorizações personalizadas em {len(transacoes)} transações...")
+    
+    for transacao in transacoes:
+        descricao_original = transacao.get("descricao", "").strip()
+        descricao_limpa = limpar_descricao_para_match(descricao_original)
+        
+        # Verifica se existe uma categorização personalizada
+        categoria_encontrada = None
+        for treated_name, categorias in categorizacoes_usuario.items():
+            if treated_name in descricao_limpa or descricao_limpa in treated_name:
+                categoria_encontrada = categorias
+                break
+        
+        if categoria_encontrada:
+            # Aplica a categorização personalizada
+            transacao["categoria"] = categoria_encontrada["categoria"]
+            transacao["subcategoria"] = categoria_encontrada["subcategoria"]
+            print(f"DEBUG: Aplicada categorização personalizada para '{descricao_original}': {categoria_encontrada['categoria']} > {categoria_encontrada['subcategoria']}")
+        else:
+            # Mantém a categorização da LLM e adiciona à lista para inserir
+            transacoes_para_inserir.append({
+                "treated_name": descricao_limpa,
+                "category": transacao.get("categoria", ""),
+                "subcategory": transacao.get("subcategoria", "")
+            })
+        
+        transacoes_atualizadas.append(transacao)
+    
+    print(f"DEBUG: {len(transacoes_para_inserir)} novas categorizações serão inseridas no banco.")
+    return transacoes_atualizadas, transacoes_para_inserir
+
+# --- FUNÇÃO AUXILIAR: Limpar descrição para matching ---
+def limpar_descricao_para_match(descricao: str) -> str:
+    """
+    Limpa e normaliza a descrição para melhor matching com treated_name.
+    """
+    # Remove caracteres especiais, números de parcela, datas, etc.
+    descricao = re.sub(r'\d{2}/\d{2}', '', descricao)  # Remove datas
+    descricao = re.sub(r'\d+/\d+', '', descricao)      # Remove parcelas
+    descricao = re.sub(r'[^\w\s]', ' ', descricao)     # Remove caracteres especiais
+    descricao = re.sub(r'\s+', ' ', descricao)         # Remove espaços múltiplos
+    return descricao.strip().lower()
+
+# --- NOVA FUNÇÃO: Inserir categorizações no Supabase ---
+async def inserir_categorizacoes_usuario(user_id: int, transacoes_para_inserir: list[dict]):
+    """
+    Insere novas categorizações no Supabase de forma assíncrona.
+    """
+    if not supabase or not transacoes_para_inserir:
+        return
+    
+    try:
+        print(f"DEBUG: Inserindo {len(transacoes_para_inserir)} categorizações para usuário {user_id}...")
+        
+        # Adiciona o user_id a cada item
+        dados_para_inserir = []
+        for item in transacoes_para_inserir:
+            dados_para_inserir.append({
+                "id": user_id,
+                "treated_name": item["treated_name"],
+                "category": item["category"],
+                "subcategory": item["subcategory"]
+            })
+        
+        # Executa a inserção em uma thread separada para não bloquear
+        await asyncio.to_thread(
+            lambda: supabase.table("Transactions").insert(dados_para_inserir).execute()
+        )
+        
+        print(f"DEBUG: Categorizações inseridas com sucesso para usuário {user_id}.")
+        
+    except Exception as e:
+        print(f"ERRO ao inserir categorizações no Supabase: {e}")
 
 
 # --- ETAPA 1: Extração Nativa (Inalterada) ---
@@ -370,8 +505,40 @@ Analise-o, extraia TODAS as transações, categorize-as e retorne o JSON formata
         return resultado_final
 
 
+# --- NOVA FUNÇÃO: Categorizar com LLM e aplicar categorizações personalizadas ---
+async def categorizar_com_llm_personalizado(texto_bruto: str, user_id: int) -> dict:
+    """
+    Versão atualizada que aplica categorizações personalizadas após o processamento da LLM.
+    """
+    print("DEBUG: Iniciando categorização com LLM + categorizações personalizadas...")
+    
+    # 1. Busca categorizações do usuário em paralelo com o processamento da LLM
+    task_categorizacoes = asyncio.create_task(buscar_categorizacoes_usuario(user_id))
+    task_llm = asyncio.create_task(categorizar_com_llm(texto_bruto))
+    
+    # Executa ambas as tarefas em paralelo
+    categorizacoes_usuario, resultado_llm = await asyncio.gather(task_categorizacoes, task_llm)
+    
+    # 2. Aplica categorizações personalizadas
+    if resultado_llm.get("success", False) and resultado_llm.get("transactions"):
+        transacoes_atualizadas, transacoes_para_inserir = aplicar_categorizacoes_personalizadas(
+            resultado_llm["transactions"], 
+            categorizacoes_usuario
+        )
+        
+        # Atualiza o resultado
+        resultado_llm["transactions"] = transacoes_atualizadas
+        resultado_llm["transactions_count"] = len(transacoes_atualizadas)
+        
+        # 3. Programa inserção assíncrona das novas categorizações
+        if transacoes_para_inserir:
+            asyncio.create_task(inserir_categorizacoes_usuario(user_id, transacoes_para_inserir))
+    
+    return resultado_llm
+
+
 # --- Refatoração: Lógica de Processamento Principal (Síncrono) ---
-async def _processar_bytes_sync(pdf_bytes: bytes) -> JSONResponse:
+async def _processar_bytes_sync(pdf_bytes: bytes, user_id: int = None) -> JSONResponse:
     """
     Função interna que executa o pipeline principal e retorna o resultado.
     Usada pelo endpoint de upload de arquivo (síncrono).
@@ -388,9 +555,12 @@ async def _processar_bytes_sync(pdf_bytes: bytes) -> JSONResponse:
     if texto_bruto is None:
         raise HTTPException(status_code=400, detail="Falha ao extrair texto do PDF (Nativo e OCR).")
         
-    # ETAPA 3: Análise e Formatação (Chamada Única)
+    # ETAPA 3: Análise e Formatação (Com ou sem categorizações personalizadas)
     try:
-        json_final = await categorizar_com_llm(texto_bruto)
+        if user_id is not None:
+            json_final = await categorizar_com_llm_personalizado(texto_bruto, user_id)
+        else:
+            json_final = await categorizar_com_llm(texto_bruto)
         
         end_time = time.time()
         print(f"SUCESSO: Processamento concluído em {end_time - start_time:.2f} segundos.")
@@ -409,12 +579,12 @@ async def _processar_bytes_sync(pdf_bytes: bytes) -> JSONResponse:
         return JSONResponse(status_code=500, content={"success": False, "error_message": f"Erro inesperado: {e}"})
 
 # --- NOVO: Lógica de Processamento em Background (Assíncrono com Webhook) ---
-async def processar_e_enviar_webhook(file_url: str, webhook_url: str):
+async def processar_e_enviar_webhook(file_url: str, webhook_url: str, user_id: int):
     """
     Worker de background: baixa, processa e envia o resultado para o webhook.
     """
     start_time = time.time()  # Início do cronômetro
-    print(f"INFO [BG]: Iniciando processamento para: {file_url}")
+    print(f"INFO [BG]: Iniciando processamento para usuário {user_id}: {file_url}")
     print(f"INFO [BG]: Webhook de destino: {webhook_url}")
     json_resultado = {}
     
@@ -438,14 +608,14 @@ async def processar_e_enviar_webhook(file_url: str, webhook_url: str):
         if texto_bruto is None:
             raise HTTPException(status_code=400, detail="Falha ao extrair texto do PDF (Nativo e OCR).")
         
-        # 4. Análise e Formatação (Chamada Única)
-        json_resultado = await categorizar_com_llm(texto_bruto)
+        # 4. Análise e Formatação com categorizações personalizadas
+        json_resultado = await categorizar_com_llm_personalizado(texto_bruto, user_id)
         
         # 5. Atualiza a contagem de transações
         if "transactions" in json_resultado and isinstance(json_resultado["transactions"], list):
             json_resultado["transactions_count"] = len(json_resultado["transactions"])
 
-        print(f"SUCESSO [BG]: Processamento concluído para: {file_url}")
+        print(f"SUCESSO [BG]: Processamento concluído para usuário {user_id}")
 
     except Exception as e:
         print(f"ERRO [BG]: Falha no pipeline: {e}")
@@ -479,37 +649,38 @@ async def processar_e_enviar_webhook(file_url: str, webhook_url: str):
 
 # --- O Endpoint Principal (Upload de Arquivo - Síncrono) ---
 @app.post("/processar-extrato/")
-async def processar_extrato_endpoint(file: UploadFile = File(...)):
+async def processar_extrato_endpoint(file: UploadFile = File(...), user_id: int = 1):
     """
     Recebe um PDF via upload de arquivo (form-data), 
     executa o pipeline otimizado e retorna o JSON
     """
-    print(f"INFO: Recebido arquivo: {file.filename}")
+    print(f"INFO: Recebido arquivo: {file.filename} para usuário {user_id}")
     pdf_bytes = await file.read()
-    return await _processar_bytes_sync(pdf_bytes)
+    return await _processar_bytes_sync(pdf_bytes, user_id)
 
 
 # --- Endpoint de URL (Assíncrono com Webhook) ---
 @app.post("/processar-extrato-url/")
 async def processar_extrato_url_endpoint(payload: URLPayload, background_tasks: BackgroundTasks):
     """
-    Recebe um JSON com uma 'file_url' e 'webhook_url',
+    Recebe um JSON com uma 'file_url', 'webhook_url' e 'user_id',
     inicia o processamento em background e retorna as transações
     """
-    print(f"INFO: Recebida requisição de URL: {payload.file_url}")
+    print(f"INFO: Recebida requisição de URL para usuário {payload.user_id}: {payload.file_url}")
     print(f"INFO: Webhook será enviado para: {payload.webhook_url}")
     
     # Adiciona a tarefa pesada (baixar, processar, enviar webhook) ao background
     background_tasks.add_task(
         processar_e_enviar_webhook, 
         file_url=payload.file_url, 
-        webhook_url=payload.webhook_url
+        webhook_url=payload.webhook_url,
+        user_id=payload.user_id
     )
     
     # Retorna imediatamente
     return JSONResponse(
         status_code=202, # 202 Accepted
-        content={"status": "processamento_iniciado", "file_url": payload.file_url}
+        content={"status": "processamento_iniciado", "user_id": payload.user_id, "file_url": payload.file_url}
     )
 
 
