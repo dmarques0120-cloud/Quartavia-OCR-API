@@ -1,8 +1,3 @@
-# Este arquivo armazena o prompt do sistema e o schema JSON
-# para a chamada final da LLM.
-
-# 1. O Prompt do Sistema (Baseado no seu 'agents.yaml' e 'tasks.yaml')
-# Define o "cérebro" da LLM
 PROMPT_SISTEMA = """
 Você é uma API de processamento de extratos financeiros de alta precisão.
 Sua única tarefa é receber texto bruto (de um OCR ou extração nativa) e convertê-lo
@@ -92,7 +87,6 @@ REGRAS DE ANÁLISE:
 }
 """
 
-# 2. A Lista de Categorias (Para injetar no prompt do usuário)
 CATEGORIAS_COMPLETAS = """
 **CATEGORIAS PRINCIPAIS:**
         - MORADIA
@@ -221,9 +215,4 @@ CATEGORIAS_COMPLETAS = """
         - Se contém cabeçalhos como "FATURA", "CARTÃO", "CARD", use "credit-card-statement"
         - Se contém "EXTRATO", "CONTA CORRENTE", "POUPANÇA", use "extrato"  
         - Se não conseguir determinar, use "other"
-
-# 3. O Schema JSON (Removido)
-# A API da OpenAI (gpt-4o) com response_format="json_object" 
-# não usa um schema detalhado como o Gemini.
-# A estrutura do JSON foi movida para o PROMPT_SISTEMA.
 """
