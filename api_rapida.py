@@ -256,7 +256,7 @@ async def extrair_texto_ocr(pdf_bytes: bytes) -> str | None:
             model=MODEL_OPENAI,
             messages=messages,
             max_tokens=4096,
-            temperature=0.0
+            temperature=1
         )
         
         texto_ocr = response.choices[0].message.content
@@ -325,7 +325,7 @@ Este é o chunk {chunk_index + 1} de um documento maior.
             model=MODEL_OPENAI,
             messages=messages,
             response_format={"type": "json_object"},
-            temperature=0.0
+            temperature=1
         )
         
         json_text = response.choices[0].message.content
@@ -429,7 +429,7 @@ Analise-o, extraia TODAS as transações, categorize-as e retorne o JSON formata
                 model=MODEL_OPENAI,
                 messages=messages,
                 response_format={"type": "json_object"},
-                temperature=0.0
+                temperature=1
             )
             
             json_text = response.choices[0].message.content
