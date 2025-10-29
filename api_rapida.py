@@ -94,13 +94,11 @@ def aplicar_categorizacoes_personalizadas(transacoes: list[dict], categorizacoes
     Aplica categorizações personalizadas às transações e separa as que precisam ser inseridas.
     Retorna: (transacoes_atualizadas, transacoes_para_inserir)
     """
-    if not categorizacoes_usuario:
-        return transacoes, transacoes
-    
     transacoes_atualizadas = []
     transacoes_para_inserir = []
     
     print(f"DEBUG: Aplicando categorizações personalizadas em {len(transacoes)} transações...")
+    print(f"DEBUG: Categorizações encontradas no banco: {len(categorizacoes_usuario)}")
     
     for transacao in transacoes:
         descricao_original = transacao.get("descricao", "").strip()
@@ -108,16 +106,18 @@ def aplicar_categorizacoes_personalizadas(transacoes: list[dict], categorizacoes
         
         # Verifica se existe uma categorização personalizada
         categoria_encontrada = None
-        for treated_name, categorias in categorizacoes_usuario.items():
-            if treated_name in descricao_limpa or descricao_limpa in treated_name:
-                categoria_encontrada = categorias
-                break
+        if categorizacoes_usuario:  # Só verifica se há categorizações existentes
+            for treated_name, categorias in categorizacoes_usuario.items():
+                if treated_name in descricao_limpa or descricao_limpa in treated_name:
+                    categoria_encontrada = categorias
+                    break
         
         if categoria_encontrada:
             transacao["categoria"] = categoria_encontrada["categoria"]
             transacao["subcategoria"] = categoria_encontrada["subcategoria"]
             print(f"DEBUG: Aplicada categorização personalizada para '{descricao_original}': {categoria_encontrada['categoria']} > {categoria_encontrada['subcategoria']}")
         else:
+            # Sempre adiciona para inserção se não encontrou categorização (incluindo quando não há categorizações no banco)
             transacoes_para_inserir.append({
                 "treated_name": descricao_limpa,
                 "category": transacao.get("categoria", ""),
@@ -256,7 +256,7 @@ async def extrair_texto_ocr(pdf_bytes: bytes) -> str | None:
             model=MODEL_OPENAI,
             messages=messages,
             max_tokens=4096,
-            temperature=0.7
+            temperature=0.0
         )
         
         texto_ocr = response.choices[0].message.content
@@ -325,7 +325,7 @@ Este é o chunk {chunk_index + 1} de um documento maior.
             model=MODEL_OPENAI,
             messages=messages,
             response_format={"type": "json_object"},
-            temperature=0.7
+            temperature=0.0
         )
         
         json_text = response.choices[0].message.content
@@ -429,7 +429,7 @@ Analise-o, extraia TODAS as transações, categorize-as e retorne o JSON formata
                 model=MODEL_OPENAI,
                 messages=messages,
                 response_format={"type": "json_object"},
-                temperature=0.7
+                temperature=0.0
             )
             
             json_text = response.choices[0].message.content
