@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from openai import AsyncOpenAI
+from google import genai
 import pdfplumber
 import fitz
 import httpx
@@ -27,12 +27,12 @@ app = FastAPI(
     description="v1 - Processamento com Paralelismo e Webhook"
 )
 
-# 4 - Verifica se a chave da OpenAI existe
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    print("ERRO CRÍTICO: Variável de ambiente OPENAI_API_KEY não definida.")
+# 4 - Verifica se a chave do Gemini existe
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GEMINI_API_KEY:
+    print("ERRO CRÍTICO: Variável de ambiente GEMINI_API_KEY não definida.")
 
-MODEL_OPENAI = os.getenv("MODEL_OPENAI")
+MODEL_GEMINI = os.getenv("MODEL_GEMINI", "gemini-2.5-flash-lite")
 
 # 5 - Configura conexão com Supabase (opcional)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -44,9 +44,9 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 else:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# 6 - Inicializa clientes HTTP e OpenAI
+# 6 - Inicializa clientes HTTP e Gemini
 http_client = httpx.AsyncClient(timeout=30.0)
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, timeout=30.0)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # 7 - Define modelos Pydantic para validação
 class URLPayload(BaseModel):
@@ -170,189 +170,238 @@ async def inserir_categorizacoes_usuario(user_id: int, transacoes_para_inserir: 
         print(f"ERRO ao inserir categorizações no Supabase: {e}")
 
 
-# 12 - Tenta extração nativa primeiro
-async def extrair_texto_nativo(pdf_bytes: bytes) -> str | None:
+# 12 - Extrai texto nativo por página
+async def extrair_texto_nativo_por_paginas(pdf_bytes: bytes) -> list[str]:
     """
-    Tenta extrair texto nativo do PDF. Rápido.
-    Retorna o texto bruto ou None se for uma imagem/vazio.
+    Extrai texto nativo de cada página do PDF separadamente.
+    Retorna uma lista com o texto de cada página.
     """
-    print("DEBUG: Iniciando Tentativa 1: Extração Nativa...")
-    texto_completo = ""
+    print("DEBUG: Iniciando extração nativa por páginas...")
+    paginas_texto = []
+    
     try:
         with io.BytesIO(pdf_bytes) as f:
             with pdfplumber.open(f) as pdf:
                 if not pdf.pages:
                     print("DEBUG: PDF sem páginas.")
-                    return None
-                    
-                for page in pdf.pages:
+                    return []
+                
+                for i, page in enumerate(pdf.pages):
                     texto_pagina = page.extract_text(x_tolerance=2)
-                    if texto_pagina:
-                        texto_completo += texto_pagina + "\n\n--- NOVA PÁGINA ---\n\n"
+                    if texto_pagina and len(texto_pagina.strip()) > 50:
+                        paginas_texto.append(texto_pagina.strip())
+                        print(f"DEBUG: Página {i+1} extraída: {len(texto_pagina)} caracteres")
+                    else:
+                        print(f"DEBUG: Página {i+1} vazia ou com pouco texto")
         
-        if len(texto_completo.strip()) < 100:
-            print("DEBUG: Extração nativa falhou (texto muito curto).")
-            return None
-            
-        print(f"DEBUG: Extração nativa SUCESSO ({len(texto_completo)} caracteres).")
-        return texto_completo
+        print(f"DEBUG: Extração nativa concluída: {len(paginas_texto)} páginas com texto válido")
+        return paginas_texto
         
     except Exception as e:
-        print(f"ERRO na extração nativa: {e}. Tentando OCR.")
-        return None
+        print(f"ERRO na extração nativa por páginas: {e}")
+        return []
 
-# 13 - Converte PDF para imagens
-def pdf_para_imagens_b64(pdf_bytes: bytes) -> list[dict]:
+# 13 - Tenta extração nativa primeiro (versão antiga - mantida para compatibilidade)
+async def extrair_texto_nativo(pdf_bytes: bytes) -> str | None:
     """
-    Converte *todas* as páginas do PDF em uma lista de imagens base64
-    no formato esperado pela API da OpenAI.
+    Tenta extrair texto nativo do PDF. 
+    Agora usa processamento por páginas em paralelo.
     """
-    imagens_parts = []
+    print("DEBUG: Iniciando Tentativa 1: Extração Nativa...")
+    
+    paginas_texto = await extrair_texto_nativo_por_paginas(pdf_bytes)
+    
+    if not paginas_texto:
+        print("DEBUG: Extração nativa falhou (nenhuma página com texto válido).")
+        return None
+    
+    # Se temos poucas páginas, processa diretamente
+    if len(paginas_texto) <= 2:
+        texto_completo = "\n\n--- NOVA PÁGINA ---\n\n".join(paginas_texto)
+        print(f"DEBUG: Extração nativa SUCESSO ({len(texto_completo)} caracteres).")
+        return texto_completo
+    
+    # Se temos muitas páginas, vai para processamento paralelo por página
+    print(f"DEBUG: Múltiplas páginas detectadas ({len(paginas_texto)}), será usado processamento paralelo por página.")
+    return "\n\n--- NOVA PÁGINA ---\n\n".join(paginas_texto)
+
+# 14 - Converte PDF para imagens base64 por página
+def pdf_para_imagens_individuais(pdf_bytes: bytes) -> list[dict]:
+    """
+    Converte cada página do PDF em uma imagem separada
+    no formato esperado pela API do Gemini.
+    """
+    imagens_individuais = []
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        for page in doc:
+        for i, page in enumerate(doc):
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
             img_bytes = pix.tobytes("png")
             b64_data = base64.b64encode(img_bytes).decode('utf-8')
-            imagens_parts.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/png;base64,{b64_data}"
+            imagem_part = {
+                "inline_data": {
+                    "mime_type": "image/png",
+                    "data": b64_data
                 }
+            }
+            imagens_individuais.append({
+                "pagina": i + 1,
+                "imagem": imagem_part
             })
         doc.close()
-        return imagens_parts
+        return imagens_individuais
     except Exception as e:
-        print(f"ERRO ao converter PDF para imagens: {e}")
+        print(f"ERRO ao converter PDF para imagens individuais: {e}")
         return []
 
-# 14 - Se extração nativa falhar, usa OCR
-async def extrair_texto_ocr(pdf_bytes: bytes) -> str | None:
+# 15 - Processa OCR de uma página individual
+async def processar_ocr_pagina_individual(imagem_data: dict, pagina_num: int) -> dict:
     """
-    Envia *todas* as imagens do PDF para a OpenAI em UMA ÚNICA CHAMADA.
+    Processa OCR de uma única página e retorna o texto extraído.
     """
-    print("DEBUG: Iniciando Tentativa 2: Extração OCR...")
+    print(f"DEBUG: Processando OCR da página {pagina_num}...")
     
-    imagens_parts = await asyncio.to_thread(pdf_para_imagens_b64, pdf_bytes)
-    
-    if not imagens_parts:
-        print("ERRO: OCR falhou na conversão de imagem.")
-        return None
-
-    print(f"DEBUG: Convertidas {len(imagens_parts)} páginas para OCR. Enviando UMA chamada para OpenAI...")
-
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Extraia todo o texto visível de cada uma destas páginas de extrato bancário, em ordem. Retorne apenas o texto bruto."},
-                *imagens_parts
-            ]
-        }
+    contents = [
+        {"text": f"Extraia todo o texto visível desta página {pagina_num} de extrato bancário. Retorne apenas o texto bruto."},
+        imagem_data["imagem"]
     ]
     
     try:
-        response = await openai_client.chat.completions.create(
-            model=MODEL_OPENAI,
-            messages=messages,
-            max_tokens=4096,
-            temperature=0.0
+        response = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model=MODEL_GEMINI,
+            contents=contents
         )
         
-        texto_ocr = response.choices[0].message.content
+        texto_pagina = response.text
         
-        if not texto_ocr:
-             print(f"DEBUG: OCR SUCESSO (texto vazio).")
-             return None
-
-        print(f"DEBUG: OCR SUCESSO ({len(texto_ocr)} caracteres).")
-        return texto_ocr
+        if not texto_pagina or len(texto_pagina.strip()) < 50:
+            print(f"DEBUG: OCR página {pagina_num}: texto vazio ou muito curto")
+            return {
+                "pagina": pagina_num,
+                "texto": "",
+                "sucesso": False
+            }
+        
+        print(f"DEBUG: OCR página {pagina_num} SUCESSO ({len(texto_pagina)} caracteres)")
+        return {
+            "pagina": pagina_num,
+            "texto": texto_pagina.strip(),
+            "sucesso": True
+        }
         
     except Exception as e:
-        print(f"ERRO na API de Visão (OpenAI OCR): {e}")
+        print(f"ERRO no OCR da página {pagina_num}: {e}")
+        return {
+            "pagina": pagina_num,
+            "texto": "",
+            "sucesso": False,
+            "erro": str(e)
+        }
+
+# 16 - Se extração nativa falhar, usa OCR paralelo por página
+async def extrair_texto_ocr(pdf_bytes: bytes) -> str | None:
+    """
+    Processa OCR de cada página em paralelo e junta os resultados.
+    """
+    print("DEBUG: Iniciando Tentativa 2: Extração OCR por páginas...")
+    
+    imagens_individuais = await asyncio.to_thread(pdf_para_imagens_individuais, pdf_bytes)
+    
+    if not imagens_individuais:
+        print("ERRO: OCR falhou na conversão de imagem.")
         return None
 
-# 15 - Divide texto em chunks
-def dividir_texto_em_chunks(texto: str, max_chars: int = 500) -> list[str]:
-    """
-    Divide um texto grande em chunks menores, preservando linhas completas.
-    """
-    if len(texto) <= max_chars:
-        return [texto]
-    
-    chunks = []
-    linhas = texto.split('\n')
-    chunk_atual = ""
-    
-    for linha in linhas:
-        if len(chunk_atual + linha + '\n') <= max_chars:
-            chunk_atual += linha + '\n'
-        else:
-            if chunk_atual.strip():
-                chunks.append(chunk_atual.strip())
-            chunk_atual = linha + '\n'
-    
-    if chunk_atual.strip():
-        chunks.append(chunk_atual.strip())
-    
-    return chunks
+    print(f"DEBUG: Convertidas {len(imagens_individuais)} páginas para OCR paralelo...")
 
-# 16 - Processa chunk individual
-async def processar_chunk_individual(chunk: str, chunk_index: int) -> dict:
-    """
-    Processa um chunk individual de texto e retorna as transações encontradas.
-    """
-    print(f"DEBUG: Processando chunk {chunk_index + 1} ({len(chunk)} caracteres)...")
+    # Processa todas as páginas em paralelo
+    tasks = [
+        processar_ocr_pagina_individual(img_data, img_data["pagina"])
+        for img_data in imagens_individuais
+    ]
     
-    prompt_chunk = f"""
-Analise este fragmento de extrato financeiro e extraia TODAS as transações.
-Este é o chunk {chunk_index + 1} de um documento maior.
+    try:
+        resultados_ocr = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        textos_validos = []
+        for resultado in resultados_ocr:
+            if isinstance(resultado, Exception):
+                print(f"ERRO em página durante OCR: {resultado}")
+                continue
+            
+            if resultado.get("sucesso", False) and resultado.get("texto"):
+                textos_validos.append(resultado["texto"])
+        
+        if not textos_validos:
+            print("DEBUG: OCR falhou - nenhuma página com texto válido")
+            return None
+        
+        texto_completo = "\n\n--- NOVA PÁGINA ---\n\n".join(textos_validos)
+        print(f"DEBUG: OCR SUCESSO - {len(textos_validos)} páginas processadas ({len(texto_completo)} caracteres total)")
+        return texto_completo
+        
+    except Exception as e:
+        print(f"ERRO na coordenação do OCR paralelo: {e}")
+        return None
+
+# 17 - Processa página individual
+async def processar_pagina_individual(texto_pagina: str, pagina_num: int) -> dict:
+    """
+    Processa uma página individual de texto e retorna as transações encontradas.
+    """
+    print(f"DEBUG: Processando página {pagina_num} ({len(texto_pagina)} caracteres)...")
+    
+    prompt_completo = f"""
+{PROMPT_SISTEMA}
+
+Analise esta página {pagina_num} de extrato financeiro e extraia TODAS as transações.
 
 **REGRAS DE CATEGORIZAÇÃO:**
 {CATEGORIAS_COMPLETAS}
 
-**FRAGMENTO DO TEXTO:**
-{chunk}
+**TEXTO DA PÁGINA {pagina_num}:**
+{texto_pagina}
+
+Retorne apenas um JSON válido com o resultado.
 """
 
-    messages = [
-        {"role": "system", "content": PROMPT_SISTEMA},
-        {"role": "user", "content": prompt_chunk}
-    ]
-    
     try:
-        response = await openai_client.chat.completions.create(
-            model=MODEL_OPENAI,
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.0
+        response = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model=MODEL_GEMINI,
+            contents=prompt_completo
         )
         
-        json_text = response.choices[0].message.content
+        json_text = response.text
+        # Remove markdown code blocks se existirem
+        json_text = re.sub(r'```json\s*', '', json_text)
+        json_text = re.sub(r'```\s*$', '', json_text)
+        json_text = json_text.strip()
+        
         resultado = json.loads(json_text)
         
-        print(f"DEBUG: Chunk {chunk_index + 1} processado: {len(resultado.get('transactions', []))} transações encontradas.")
+        print(f"DEBUG: Página {pagina_num} processada: {len(resultado.get('transactions', []))} transações encontradas.")
         return resultado
         
     except Exception as e:
-        print(f"ERRO no processamento do chunk {chunk_index + 1}: {e}")
+        print(f"ERRO no processamento da página {pagina_num}: {e}")
         return {
             "success": False,
             "transactions": [],
-            "error_message": f"Erro no chunk {chunk_index + 1}: {str(e)}"
+            "error_message": f"Erro na página {pagina_num}: {str(e)}"
         }
 
-# 17 - Consolida resultados dos chunks
-def consolidar_resultados_chunks(resultados_chunks: list[dict]) -> dict:
+# 18 - Consolida resultados das páginas
+def consolidar_resultados_paginas(resultados_paginas: list[dict]) -> dict:
     """
-    Consolida os resultados de múltiplos chunks em um resultado final.
+    Consolida os resultados de múltiplas páginas em um resultado final.
     """
     todas_transacoes = []
     bank_name = "TBD"
     document_type = "unknown"
     erros_reais = []
     
-    for resultado in resultados_chunks:
+    for resultado in resultados_paginas:
         if resultado.get("success", False):
             transacoes = resultado.get("transactions", [])
             todas_transacoes.extend(transacoes)
@@ -400,15 +449,20 @@ def consolidar_resultados_chunks(resultados_chunks: list[dict]) -> dict:
 # 18 - Decide estratégia baseada no tamanho do texto
 async def categorizar_com_llm(texto_bruto: str) -> dict:
     """
-    Recebe o texto bruto e processa usando chunks paralelos para melhor performance
+    Recebe o texto bruto e processa usando páginas paralelas para melhor performance
     e captura mais completa de transações.
     """
-    print("DEBUG: Iniciando Etapa 3: Análise e Categorização (Processamento Paralelo)...")
+    print("DEBUG: Iniciando Etapa 3: Análise e Categorização (Processamento Paralelo por Páginas)...")
     
-    if len(texto_bruto) <= 400:
-        print("DEBUG: Texto pequeno, processamento direto...")
+    # Verifica se o texto contém múltiplas páginas
+    paginas = texto_bruto.split("\n\n--- NOVA PÁGINA ---\n\n")
+    
+    if len(paginas) <= 1:
+        print("DEBUG: Texto pequeno ou página única, processamento direto...")
         
-        prompt_usuario = f"""
+        prompt_completo = f"""
+{PROMPT_SISTEMA}
+
 Aqui está o texto bruto extraído de um documento financeiro.
 Analise-o, extraia TODAS as transações, categorize-as e retorne o JSON formatado.
 
@@ -417,22 +471,23 @@ Analise-o, extraia TODAS as transações, categorize-as e retorne o JSON formata
 
 **TEXTO BRUTO PARA ANÁLISE:**
 {texto_bruto}
+
+Retorne apenas um JSON válido com o resultado.
 """
 
-        messages = [
-            {"role": "system", "content": PROMPT_SISTEMA},
-            {"role": "user", "content": prompt_usuario}
-        ]
-        
         try:
-            response = await openai_client.chat.completions.create(
-                model=MODEL_OPENAI,
-                messages=messages,
-                response_format={"type": "json_object"},
-                temperature=0.0
+            response = await asyncio.to_thread(
+                gemini_client.models.generate_content,
+                model=MODEL_GEMINI,
+                contents=prompt_completo
             )
             
-            json_text = response.choices[0].message.content
+            json_text = response.text
+            # Remove markdown code blocks se existirem
+            json_text = re.sub(r'```json\s*', '', json_text)
+            json_text = re.sub(r'```\s*$', '', json_text)
+            json_text = json_text.strip()
+            
             json_output = json.loads(json_text) 
             
             print("DEBUG: Análise direta concluída com SUCESSO.")
@@ -443,33 +498,30 @@ Analise-o, extraia TODAS as transações, categorize-as e retorne o JSON formata
             raise HTTPException(status_code=500, detail=f"Erro na LLM: {e}")
     
     else:
-        print(f"DEBUG: Texto extenso ({len(texto_bruto)} chars), usando processamento paralelo...")
-        
-        chunks = dividir_texto_em_chunks(texto_bruto, max_chars=500)
-        print(f"DEBUG: Texto dividido em {len(chunks)} chunks.")
+        print(f"DEBUG: Múltiplas páginas detectadas ({len(paginas)}), usando processamento paralelo por página...")
         
         tasks = [
-            processar_chunk_individual(chunk, i) 
-            for i, chunk in enumerate(chunks)
+            processar_pagina_individual(pagina.strip(), i + 1) 
+            for i, pagina in enumerate(paginas) if pagina.strip()
         ]
         
-        resultados_chunks = await asyncio.gather(*tasks, return_exceptions=True)
+        resultados_paginas = await asyncio.gather(*tasks, return_exceptions=True)
         
         resultados_validos = []
-        for i, resultado in enumerate(resultados_chunks):
+        for i, resultado in enumerate(resultados_paginas):
             if isinstance(resultado, Exception):
-                print(f"ERRO no chunk {i + 1}: {resultado}")
+                print(f"ERRO na página {i + 1}: {resultado}")
                 resultados_validos.append({
                     "success": False,
                     "transactions": [],
-                    "error_message": f"Erro no chunk {i + 1}: {str(resultado)}"
+                    "error_message": f"Erro na página {i + 1}: {str(resultado)}"
                 })
             else:
                 resultados_validos.append(resultado)
         
-        resultado_final = consolidar_resultados_chunks(resultados_validos)
+        resultado_final = consolidar_resultados_paginas(resultados_validos)
         
-        print(f"DEBUG: Processamento paralelo concluído. Total de transações: {resultado_final['transactions_count']}")
+        print(f"DEBUG: Processamento paralelo por páginas concluído. Total de transações: {resultado_final['transactions_count']}")
         return resultado_final
 
 # 19 - Aplica categorização personalizada

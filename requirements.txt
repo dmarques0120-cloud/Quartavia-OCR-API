@@ -12,6 +12,7 @@ deprecation==2.1.0
 distro==1.9.0
 eval_type_backport==0.2.2
 fastapi==0.120.0
+google-genai
 h11==0.16.0
 h2==4.3.0
 hpack==4.1.0
@@ -25,7 +26,6 @@ jsonpath-python==1.0.6
 mistralai==1.9.11
 multidict==6.7.0
 mypy_extensions==1.1.0
-openai==2.6.0
 packaging==25.0
 pdfminer.six==20250506
 pdfplumber==0.11.7

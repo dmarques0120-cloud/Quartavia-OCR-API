@@ -18,7 +18,7 @@ REGRAS DE ANÁLISE:
     - Qualquer linha que NÃO tenha uma DATA específica associada
 
 3.  **Critérios OBRIGATÓRIOS para ser considerado transação:**
-    - DEVE ter uma DATA específica (DD/MM/YYYY, DD/MM/YY, etc.)
+    - DEVE ter uma DATA específica (DD/MM/YYYY, DD/MM/YY, DD/MM - Caso não explicite o ano da operação, considere como 2025)
     - DEVE representar uma operação individual específica
     - DEVE ter um estabelecimento/serviço/descrição clara
     - NÃO pode ser um totalizador ou resumo
@@ -35,7 +35,7 @@ REGRAS DE ANÁLISE:
 
 6.  **Tipo:** Determine 'tipo' ("receita" ou "despesa") com base no contexto (créditos, débitos, sinais de +/-).
 
-7.  **Parcelamento:** Detecte parcelas (ex: "3/9", "PARC 01/12"). Se 'parcelado' for false, NÃO inclua os campos 'numero_parcelas' e 'total_parcelas'.
+7.  **Parcelamento:** Detecte parcelas (ex: "3/9", "PARC 01/12"). Se 'parcelado' for false, NÃO inclua os campos 'numero_parcelas' e 'total_parcelas'. Cheque para ver se colocou por engano.
 
 8.  **UUID:** Use "1" como 'uuid' para TODAS as transações.
 
@@ -202,7 +202,7 @@ CATEGORIAS_COMPLETAS = """
         **DETECÇÃO DE PARCELAMENTO:**
         - Procure por padrões como: "1/12", "02/10", "PARC 3/6", "PARCELA 1 DE 12", "(3/9)"
         - Se encontrar, defina parcelado=true e extraia os números
-        - Se não encontrar indicadores, defina parcelado=false, numero_parcelas=null, total_parcelas=null
+        - Se não encontrar indicadores, defina parcelado=false e não inclua numero_parcelas e total_parcelas
         
         **REGRA CRÍTICA DE EXTRAÇÃO COMPLETA:**
         - NUNCA pule uma transação que tenha um valor monetário identificável
@@ -210,6 +210,7 @@ CATEGORIAS_COMPLETAS = """
         - Prefira incluir transações duvidosas a omiti-las
         - Se não conseguir identificar a descrição completa, use o texto disponível
         - Para linhas com valores isolados, tente associar com contexto próximo
+        - Para linhas com mais de um valor monetário (Exemplo: em Dolar e em Real), escolha o valor em Real (R$)
         
         **TIPO DE DOCUMENTO:**
         - Se contém cabeçalhos como "FATURA", "CARTÃO", "CARD", use "credit-card-statement"
