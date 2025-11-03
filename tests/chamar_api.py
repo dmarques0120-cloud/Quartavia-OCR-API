@@ -9,7 +9,7 @@ API_URL = "http://localhost:8000/"
 ENDPOINT = "/processar-extrato-url/"
 
 # URLs para teste
-FILE_URL = "https://uugjjiacxcqcpayzpthl.supabase.co/storage/v1/object/public/quartavia/uploads/1761194245_Bradesco.pdf"
+FILE_URL = "https://uugjjiacxcqcpayzpthl.supabase.co/storage/v1/object/public/quartavia/uploads/1761175347_Picpay.pdf"
 WEBHOOK_URL = "https://webhook.site/20e0bcc4-dd21-48e4-9368-273bcb1d8a73"  # Substitua por uma URL real
 
 def chamar_api_assincrona(file_url, webhook_url, user_id=1):

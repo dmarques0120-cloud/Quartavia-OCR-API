@@ -48,14 +48,56 @@ else:
 http_client = httpx.AsyncClient(timeout=30.0)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 7 - Define modelos Pydantic para validação
+
+# 7 - Função para desbloquear PDF com senha
+def desbloquear_pdf_com_senha(pdf_bytes: bytes, senha: str | None) -> bytes:
+    """
+    Tenta desbloquear um PDF protegido por senha.
+    Se não há senha ou o PDF não está protegido, retorna os bytes originais.
+    """
+    if not senha:
+        print("DEBUG: Nenhuma senha fornecida, processando PDF normalmente.")
+        return pdf_bytes
+    
+    try:
+        # Tenta abrir com PyMuPDF (fitz) primeiro
+        print("DEBUG: Tentando desbloquear PDF com a senha fornecida...")
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        
+        if doc.is_encrypted:
+            print("DEBUG: PDF está criptografado, aplicando senha...")
+            if doc.authenticate(senha):
+                print("DEBUG: Senha correta! PDF desbloqueado com sucesso.")
+                # Salva o PDF desbloqueado em bytes
+                pdf_desbloqueado = doc.write()
+                doc.close()
+                return pdf_desbloqueado
+            else:
+                doc.close()
+                print("ERRO: Senha incorreta para o PDF.")
+                raise HTTPException(status_code=400, detail="Senha incorreta para o PDF protegido.")
+        else:
+            print("DEBUG: PDF não está criptografado, processando normalmente.")
+            doc.close()
+            return pdf_bytes
+            
+    except fitz.FileDataError:
+        print("ERRO: Arquivo PDF corrompido ou inválido.")
+        raise HTTPException(status_code=400, detail="Arquivo PDF corrompido ou inválido.")
+    except Exception as e:
+        print(f"ERRO inesperado ao desbloquear PDF: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro ao processar PDF protegido: {e}")
+
+# 8 - Define modelos Pydantic para validação
 class URLPayload(BaseModel):
     file_url: str
     webhook_url: str
     user_id: int
+    senha_do_pdf: str | None = None
 
 class FilePayload(BaseModel):
     user_id: int
+    senha_do_pdf: str | None = None
 
 
 # 8 - Busca categorizações salvas do usuário
@@ -551,12 +593,18 @@ async def categorizar_com_llm_personalizado(texto_bruto: str, user_id: int) -> d
     return resultado_llm
 
 # 20 - Pipeline de processamento síncrono
-async def _processar_bytes_sync(pdf_bytes: bytes, user_id: int = None) -> JSONResponse:
+async def _processar_bytes_sync(pdf_bytes: bytes, user_id: int = None, senha_do_pdf: str | None = None) -> JSONResponse:
     """
     Função interna que executa o pipeline principal e retorna o resultado.
     Usada pelo endpoint de upload de arquivo (síncrono).
     """
     start_time = time.time()
+    
+    # Tenta desbloquear o PDF se uma senha foi fornecida
+    try:
+        pdf_bytes = desbloquear_pdf_com_senha(pdf_bytes, senha_do_pdf)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"success": False, "error_message": e.detail})
     
     texto_bruto = await extrair_texto_nativo(pdf_bytes)
     
@@ -587,13 +635,15 @@ async def _processar_bytes_sync(pdf_bytes: bytes, user_id: int = None) -> JSONRe
         return JSONResponse(status_code=500, content={"success": False, "error_message": f"Erro inesperado: {e}"})
 
 # 21 - Pipeline de processamento assíncrono
-async def processar_e_enviar_webhook(file_url: str, webhook_url: str, user_id: int):
+async def processar_e_enviar_webhook(file_url: str, webhook_url: str, user_id: int, senha_do_pdf: str | None = None):
     """
     Worker de background: baixa, processa e envia o resultado para o webhook.
     """
     start_time = time.time()
     print(f"INFO [BG]: Iniciando processamento para usuário {user_id}: {file_url}")
     print(f"INFO [BG]: Webhook de destino: {webhook_url}")
+    if senha_do_pdf:
+        print("INFO [BG]: PDF protegido por senha detectado.")
     json_resultado = {}
     
     try:
@@ -604,6 +654,13 @@ async def processar_e_enviar_webhook(file_url: str, webhook_url: str, user_id: i
         except httpx.RequestError as e:
             print(f"ERRO [BG]: Falha ao baixar a URL: {e}")
             raise HTTPException(status_code=400, detail=f"Falha ao baixar o PDF da URL: {e}")
+
+        # Tenta desbloquear o PDF se uma senha foi fornecida
+        try:
+            pdf_bytes = desbloquear_pdf_com_senha(pdf_bytes, senha_do_pdf)
+        except HTTPException as e:
+            print(f"ERRO [BG]: Falha ao desbloquear PDF: {e.detail}")
+            raise e
 
         texto_bruto = await extrair_texto_nativo(pdf_bytes)
         
@@ -647,30 +704,36 @@ async def processar_e_enviar_webhook(file_url: str, webhook_url: str, user_id: i
 
 # 22 - Endpoint de upload direto
 @app.post("/processar-extrato/")
-async def processar_extrato_endpoint(file: UploadFile = File(...), user_id: int = 1):
+async def processar_extrato_endpoint(file: UploadFile = File(...), user_id: int = 1, senha_do_pdf: str | None = None):
     """
     Recebe um PDF via upload de arquivo (form-data), 
-    executa o pipeline otimizado e retorna o JSON
+    executa o pipeline otimizado e retorna o JSON.
+    Aceita um parâmetro opcional 'senha_do_pdf' para PDFs protegidos.
     """
     print(f"INFO: Recebido arquivo: {file.filename} para usuário {user_id}")
+    if senha_do_pdf:
+        print("INFO: Senha do PDF fornecida.")
     pdf_bytes = await file.read()
-    return await _processar_bytes_sync(pdf_bytes, user_id)
+    return await _processar_bytes_sync(pdf_bytes, user_id, senha_do_pdf)
 
 # 23 - Endpoint de URL assíncrona
 @app.post("/processar-extrato-url/")
 async def processar_extrato_url_endpoint(payload: URLPayload, background_tasks: BackgroundTasks):
     """
-    Recebe um JSON com uma 'file_url', 'webhook_url' e 'user_id',
+    Recebe um JSON com uma 'file_url', 'webhook_url', 'user_id' e opcionalmente 'senha_do_pdf',
     inicia o processamento em background e retorna as transações
     """
     print(f"INFO: Recebida requisição de URL para usuário {payload.user_id}: {payload.file_url}")
     print(f"INFO: Webhook será enviado para: {payload.webhook_url}")
+    if payload.senha_do_pdf:
+        print("INFO: Senha do PDF fornecida na requisição.")
     
     background_tasks.add_task(
         processar_e_enviar_webhook, 
         file_url=payload.file_url, 
         webhook_url=payload.webhook_url,
-        user_id=payload.user_id
+        user_id=payload.user_id,
+        senha_do_pdf=payload.senha_do_pdf
     )
     
     return JSONResponse(
