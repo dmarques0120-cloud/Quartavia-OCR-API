@@ -88,6 +88,32 @@ def desbloquear_pdf_com_senha(pdf_bytes: bytes, senha: str | None) -> bytes:
         print(f"ERRO inesperado ao desbloquear PDF: {e}")
         raise HTTPException(status_code=500, detail=f"Erro ao processar PDF protegido: {e}")
 
+# 7.1 - Função para decodificar base64
+def decodificar_base64_para_bytes(base64_string: str) -> bytes:
+    """
+    Decodifica uma string base64 para bytes.
+    Remove prefixos como 'data:application/pdf;base64,' se presentes.
+    """
+    try:
+        # Remove prefixo de data URL se existir
+        if ',' in base64_string and base64_string.startswith('data:'):
+            base64_string = base64_string.split(',', 1)[1]
+        
+        # Remove espaços em branco
+        base64_string = base64_string.strip()
+        
+        # Decodifica base64
+        pdf_bytes = base64.b64decode(base64_string)
+        
+        # Verifica se é um PDF válido (deve começar com %PDF)
+        if not pdf_bytes.startswith(b'%PDF'):
+            raise ValueError("Arquivo decodificado não é um PDF válido")
+        
+        return pdf_bytes
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Erro ao decodificar base64: {e}")
+
 # 8 - Define modelos Pydantic para validação
 class URLPayload(BaseModel):
     file_url: str
@@ -96,6 +122,12 @@ class URLPayload(BaseModel):
     senha_do_pdf: str | None = None
 
 class FilePayload(BaseModel):
+    user_id: int
+    senha_do_pdf: str | None = None
+
+class Base64Payload(BaseModel):
+    file_base64: str
+    filename: str | None = None
     user_id: int
     senha_do_pdf: str | None = None
 
@@ -741,7 +773,26 @@ async def processar_extrato_url_endpoint(payload: URLPayload, background_tasks: 
         content={"status": "processamento_iniciado", "user_id": payload.user_id, "file_url": payload.file_url}
     )
 
-# 24 - Inicia servidor web
+# 24 - Endpoint de base64
+@app.post("/processar-extrato-base64/")
+async def processar_extrato_base64_endpoint(payload: Base64Payload):
+    """
+    Recebe um PDF em base64, executa o pipeline otimizado e retorna o JSON.
+    Aceita um parâmetro opcional 'senha_do_pdf' para PDFs protegidos.
+    """
+    print(f"INFO: Recebido arquivo base64 para usuário {payload.user_id}")
+    if payload.filename:
+        print(f"INFO: Nome do arquivo: {payload.filename}")
+    if payload.senha_do_pdf:
+        print("INFO: Senha do PDF fornecida.")
+    
+    try:
+        pdf_bytes = decodificar_base64_para_bytes(payload.file_base64)
+        return await _processar_bytes_sync(pdf_bytes, payload.user_id, payload.senha_do_pdf)
+    except HTTPException as e:
+        return JSONResponse(status_code=e.status_code, content={"success": False, "error_message": e.detail})
+
+# 25 - Inicia servidor web
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     host = "0.0.0.0"
