@@ -24,7 +24,7 @@ load_dotenv()
 # 3 - Configura aplicação FastAPI
 app = FastAPI(
     title="Quartavia OCR API",
-    description="v1 - Processamento com Paralelismo e Webhook"
+    description="v2.0 - Processamento com Paralelismo por Página"
 )
 
 # 4 - Verifica se a chave do Gemini existe
@@ -114,6 +114,114 @@ def decodificar_base64_para_bytes(base64_string: str) -> bytes:
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Erro ao decodificar base64: {e}")
 
+# 7.2 - Função para contar tokens de arquivo base64
+async def contar_tokens_base64(base64_string: str) -> dict:
+    """
+    Conta tokens de um arquivo em base64 usando a API Gemini.
+    Retorna um dicionário com o resultado da contagem.
+    """
+    try:
+        # Decodifica o base64
+        file_bytes = decodificar_base64_para_bytes(base64_string)
+        
+        # Verifica se é um arquivo de imagem válido (PNG, JPEG, etc.)
+        is_image = False
+        if file_bytes.startswith(b'\x89PNG') or file_bytes.startswith(b'\xff\xd8\xff'):
+            is_image = True
+        elif file_bytes.startswith(b'%PDF'):
+            # Para PDFs, precisamos converter para imagens primeiro
+            # Neste caso, vamos tratar como conteúdo multimodal
+            is_image = False
+        
+        if is_image:
+            # Converte bytes da imagem para PIL Image
+            import PIL.Image
+            image = PIL.Image.open(io.BytesIO(file_bytes))
+            
+            # Conta tokens para a imagem
+            result = gemini_client.models.count_tokens(
+                model=MODEL_GEMINI,
+                contents=[image]
+            )
+            
+            return {
+                "total_tokens": result.total_tokens,
+                "type": "image",
+                "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+            }
+        else:
+            # Para outros tipos de arquivo (como PDF), tenta processar como documento
+            # Neste caso, vamos extrair texto primeiro e depois contar tokens
+            if file_bytes.startswith(b'%PDF'):
+                # Extrai texto do PDF
+                texto_extraido = await extrair_texto_pdf_bytes(file_bytes)
+                
+                # Conta tokens do texto extraído
+                result = gemini_client.models.count_tokens(
+                    model=MODEL_GEMINI,
+                    contents=texto_extraido
+                )
+                
+                return {
+                    "total_tokens": result.total_tokens,
+                    "type": "pdf_text",
+                    "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+                }
+            else:
+                # Tenta como texto simples
+                try:
+                    texto = file_bytes.decode('utf-8')
+                    result = gemini_client.models.count_tokens(
+                        model=MODEL_GEMINI,
+                        contents=texto
+                    )
+                    
+                    return {
+                        "total_tokens": result.total_tokens,
+                        "type": "text",
+                        "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+                    }
+                except UnicodeDecodeError:
+                    raise HTTPException(status_code=400, detail="Formato de arquivo não suportado para contagem de tokens")
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERRO ao contar tokens: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro ao contar tokens: {e}")
+
+# 7.3 - Função auxiliar para extrair texto de PDF
+async def extrair_texto_pdf_bytes(pdf_bytes: bytes) -> str:
+    """
+    Extrai texto de um PDF em bytes para contagem de tokens.
+    """
+    try:
+        texto_extraido = ""
+        
+        # Usa pdfplumber para extrair texto
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for pagina in pdf.pages:
+                texto_pagina = pagina.extract_text()
+                if texto_pagina:
+                    texto_extraido += texto_pagina + "\n"
+        
+        return texto_extraido.strip()
+        
+    except Exception as e:
+        print(f"ERRO ao extrair texto do PDF: {e}")
+        # Se falhar com pdfplumber, tenta com PyMuPDF
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            texto_extraido = ""
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                texto_extraido += page.get_text() + "\n"
+            doc.close()
+            return texto_extraido.strip()
+        except Exception as e2:
+            print(f"ERRO ao extrair texto com PyMuPDF: {e2}")
+            raise HTTPException(status_code=500, detail="Erro ao extrair texto do PDF para contagem de tokens")
+
 # 8 - Define modelos Pydantic para validação
 class URLPayload(BaseModel):
     file_url: str
@@ -130,6 +238,10 @@ class Base64Payload(BaseModel):
     filename: str | None = None
     user_id: int
     senha_do_pdf: str | None = None
+
+class TokenCountPayload(BaseModel):
+    file_base64: str
+    filename: str | None = None
 
 
 # 8 - Busca categorizações salvas do usuário
@@ -772,6 +884,58 @@ async def processar_extrato_url_endpoint(payload: URLPayload, background_tasks: 
         status_code=202,
         content={"status": "processamento_iniciado", "user_id": payload.user_id, "file_url": payload.file_url}
     )
+
+# 23.5 - Endpoint para contagem de tokens
+@app.post("/contar-tokens-base64/")
+async def contar_tokens_base64_endpoint(payload: TokenCountPayload):
+    """
+    Recebe um arquivo em base64 e retorna a contagem de tokens.
+    
+    Resposta de sucesso inclui:
+    - total_tokens: número total de tokens no arquivo
+    - status: "OK" se <= 100k tokens, "Exceeded" se > 100k tokens
+    - file_type: tipo do arquivo processado (text, image, pdf_text)
+    - filename: nome do arquivo fornecido
+    """
+    print("INFO: Iniciando contagem de tokens para arquivo base64")
+    if payload.filename:
+        print(f"INFO: Nome do arquivo: {payload.filename}")
+    
+    try:
+        resultado = await contar_tokens_base64(payload.file_base64)
+        print(f"INFO: Contagem concluída - {resultado['total_tokens']} tokens ({resultado['status']})")
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "total_tokens": resultado["total_tokens"],
+                "status": resultado["status"],
+                "file_type": resultado["type"],
+                "filename": payload.filename
+            }
+        )
+        
+    except HTTPException as e:
+        print(f"ERRO HTTP na contagem de tokens: {e.detail}")
+        return JSONResponse(
+            status_code=e.status_code, 
+            content={
+                "success": False, 
+                "error_message": e.detail,
+                "filename": payload.filename
+            }
+        )
+    except Exception as e:
+        print(f"ERRO inesperado na contagem de tokens: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error_message": f"Erro inesperado: {e}",
+                "filename": payload.filename
+            }
+        )
 
 # 24 - Endpoint de base64
 @app.post("/processar-extrato-base64/")
