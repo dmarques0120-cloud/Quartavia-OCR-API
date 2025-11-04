@@ -7,6 +7,7 @@ import time
 import json
 import base64
 import re
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -690,6 +691,66 @@ Retorne apenas um JSON válido com o resultado.
             "error_message": f"Erro na página {pagina_num}: {str(e)}"
         }
 
+# 17.5 - Função auxiliar para extrair meses das transações
+def extrair_meses_transacoes(transacoes: list[dict]) -> tuple[str, str]:
+    """
+    Extrai o mês da transação mais antiga (start_month) e mais nova (end_month).
+    Retorna uma tupla (start_month, end_month) no formato "YYYY-MM".
+    """
+    if not transacoes:
+        return None, None
+    
+    datas_validas = []
+    
+    for transacao in transacoes:
+        data_str = transacao.get('data', '')
+        if not data_str:
+            continue
+            
+        try:
+            # Tenta diferentes formatos de data
+            formatos = [
+                '%Y-%m-%d',    # 2024-01-15
+                '%d/%m/%Y',    # 15/01/2024
+                '%d-%m-%Y',    # 15-01-2024
+                '%m/%d/%Y',    # 01/15/2024
+                '%Y/%m/%d',    # 2024/01/15
+                '%d/%m/%y',    # 15/01/24
+                '%m/%d/%y',    # 01/15/24
+                '%y-%m-%d',    # 24-01-15
+            ]
+            
+            data_parseada = None
+            for formato in formatos:
+                try:
+                    data_parseada = datetime.strptime(data_str, formato)
+                    break
+                except ValueError:
+                    continue
+            
+            if data_parseada:
+                datas_validas.append(data_parseada)
+                
+        except Exception as e:
+            print(f"DEBUG: Erro ao parsear data '{data_str}': {e}")
+            continue
+    
+    if not datas_validas:
+        return None, None
+    
+    # Ordena as datas para encontrar a mais antiga e mais nova
+    datas_validas.sort()
+    
+    data_mais_antiga = datas_validas[0]
+    data_mais_nova = datas_validas[-1]
+    
+    start_month = data_mais_antiga.strftime('%Y-%m')
+    end_month = data_mais_nova.strftime('%Y-%m')
+    
+    print(f"DEBUG: Período das transações: {start_month} até {end_month}")
+    
+    return start_month, end_month
+
 # 18 - Consolida resultados das páginas
 def consolidar_resultados_paginas(resultados_paginas: list[dict]) -> dict:
     """
@@ -734,10 +795,15 @@ def consolidar_resultados_paginas(resultados_paginas: list[dict]) -> dict:
     elif erros_reais:
         error_message = "; ".join(erros_reais)
     
+    # Extrai os meses das transações
+    start_month, end_month = extrair_meses_transacoes(transacoes_unicas)
+    
     resultado_final = {
         "success": len(transacoes_unicas) > 0,
         "bank_name": bank_name,
         "document_type": document_type,
+        "start_month": start_month,
+        "end_month": end_month,
         "transactions_count": len(transacoes_unicas),
         "transactions": transacoes_unicas,
         "error_message": error_message
@@ -941,6 +1007,8 @@ async def processar_e_enviar_webhook(file_url: str, webhook_url: str, user_id: i
             "success": False,
             "bank_name": "TBD",
             "document_type": "unknown",
+            "start_month": None,
+            "end_month": None,
             "transactions_count": 0,
             "transactions": [],
             "error_message": f"Erro no processamento em background: {detail}"
