@@ -222,6 +222,117 @@ async def extrair_texto_pdf_bytes(pdf_bytes: bytes) -> str:
             print(f"ERRO ao extrair texto com PyMuPDF: {e2}")
             raise HTTPException(status_code=500, detail="Erro ao extrair texto do PDF para contagem de tokens")
 
+# 7.4 - Função para contar tokens de UploadFile
+async def contar_tokens_upload_file(file: UploadFile) -> dict:
+    """
+    Conta tokens de um UploadFile usando a API Gemini.
+    Retorna um dicionário com o resultado da contagem.
+    """
+    try:
+        # Lê o conteúdo do arquivo
+        file_content = await file.read()
+        
+        # Detecta o tipo de arquivo baseado no content type e extensão
+        content_type = file.content_type or ""
+        filename = file.filename or ""
+        
+        print(f"DEBUG: Processando arquivo - Nome: {filename}, Tipo: {content_type}, Tamanho: {len(file_content)} bytes")
+        
+        # Verifica se é uma imagem
+        is_image = False
+        if (content_type.startswith("image/") or 
+            filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp')) or
+            file_content.startswith(b'\x89PNG') or 
+            file_content.startswith(b'\xff\xd8\xff')):
+            is_image = True
+        
+        if is_image:
+            # Converte bytes da imagem para PIL Image
+            import PIL.Image
+            image = PIL.Image.open(io.BytesIO(file_content))
+            
+            # Conta tokens para a imagem
+            result = gemini_client.models.count_tokens(
+                model=MODEL_GEMINI,
+                contents=[image]
+            )
+            
+            return {
+                "total_tokens": result.total_tokens,
+                "type": "image",
+                "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+            }
+            
+        # Verifica se é um PDF
+        elif (content_type == "application/pdf" or 
+              filename.lower().endswith('.pdf') or
+              file_content.startswith(b'%PDF')):
+            
+            # Extrai texto do PDF
+            texto_extraido = await extrair_texto_pdf_bytes(file_content)
+            
+            # Conta tokens do texto extraído
+            result = gemini_client.models.count_tokens(
+                model=MODEL_GEMINI,
+                contents=texto_extraido
+            )
+            
+            return {
+                "total_tokens": result.total_tokens,
+                "type": "pdf_text",
+                "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+            }
+            
+        # Tenta como arquivo de texto
+        else:
+            try:
+                # Tenta decodificar como texto UTF-8
+                texto = file_content.decode('utf-8')
+                
+                result = gemini_client.models.count_tokens(
+                    model=MODEL_GEMINI,
+                    contents=texto
+                )
+                
+                return {
+                    "total_tokens": result.total_tokens,
+                    "type": "text",
+                    "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+                }
+                
+            except UnicodeDecodeError:
+                # Se não conseguir decodificar como texto, tenta outras codificações
+                for encoding in ['latin-1', 'cp1252', 'iso-8859-1']:
+                    try:
+                        texto = file_content.decode(encoding)
+                        result = gemini_client.models.count_tokens(
+                            model=MODEL_GEMINI,
+                            contents=texto
+                        )
+                        
+                        return {
+                            "total_tokens": result.total_tokens,
+                            "type": f"text_{encoding}",
+                            "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+                        }
+                    except:
+                        continue
+                
+                # Se nenhuma codificação funcionar
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"Formato de arquivo não suportado para contagem de tokens. Tipo: {content_type}, Nome: {filename}"
+                )
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERRO ao contar tokens do upload: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro ao contar tokens: {e}")
+    finally:
+        # Reseta o ponteiro do arquivo para o início (boa prática)
+        await file.seek(0)
+
 # 8 - Define modelos Pydantic para validação
 class URLPayload(BaseModel):
     file_url: str
@@ -934,6 +1045,76 @@ async def contar_tokens_base64_endpoint(payload: TokenCountPayload):
                 "success": False,
                 "error_message": f"Erro inesperado: {e}",
                 "filename": payload.filename
+            }
+        )
+
+# 23.6 - Endpoint para contagem de tokens via upload
+@app.post("/contar-tokens-upload/")
+async def contar_tokens_upload_endpoint(file: UploadFile = File(...)):
+    """
+    Recebe um arquivo via upload e retorna a contagem de tokens.
+    
+    Suporta:
+    - Arquivos de texto (.txt, .md, .py, etc.)
+    - Imagens (.png, .jpg, .jpeg, .gif, .bmp, .webp)
+    - PDFs (.pdf)
+    
+    Resposta de sucesso inclui:
+    - total_tokens: número total de tokens no arquivo
+    - status: "OK" se <= 100k tokens, "Exceeded" se > 100k tokens
+    - file_type: tipo do arquivo processado (text, image, pdf_text)
+    - filename: nome do arquivo enviado
+    - file_size: tamanho do arquivo em bytes
+    """
+    print(f"INFO: Iniciando contagem de tokens para arquivo upload: {file.filename}")
+    print(f"INFO: Tipo de conteúdo: {file.content_type}")
+    
+    # Verifica se o arquivo não está vazio
+    if file.size == 0:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "error_message": "Arquivo vazio enviado",
+                "filename": file.filename
+            }
+        )
+    
+    try:
+        resultado = await contar_tokens_upload_file(file)
+        print(f"INFO: Contagem concluída - {resultado['total_tokens']} tokens ({resultado['status']})")
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "total_tokens": resultado["total_tokens"],
+                "status": resultado["status"],
+                "file_type": resultado["type"],
+                "filename": file.filename,
+                "file_size": file.size,
+                "content_type": file.content_type
+            }
+        )
+        
+    except HTTPException as e:
+        print(f"ERRO HTTP na contagem de tokens do upload: {e.detail}")
+        return JSONResponse(
+            status_code=e.status_code, 
+            content={
+                "success": False, 
+                "error_message": e.detail,
+                "filename": file.filename
+            }
+        )
+    except Exception as e:
+        print(f"ERRO inesperado na contagem de tokens do upload: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error_message": f"Erro inesperado: {e}",
+                "filename": file.filename
             }
         )
 
