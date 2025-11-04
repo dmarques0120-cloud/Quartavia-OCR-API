@@ -34,9 +34,11 @@ if not GEMINI_API_KEY:
 
 MODEL_GEMINI = os.getenv("MODEL_GEMINI", "gemini-2.5-flash-lite")
 
-# 5 - Configura conexão com Supabase (opcional)
+# 5 - Configura conexão com Supabase (opcional) + Token Limit
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+TOKENFILE_LIMIT=int(os.getenv("TOKENFILE_LIMIT"))
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     print("AVISO: Variáveis do Supabase não configuradas. Funcionalidade de categorização personalizada desabilitada.")
@@ -147,7 +149,7 @@ async def contar_tokens_base64(base64_string: str) -> dict:
             return {
                 "total_tokens": result.total_tokens,
                 "type": "image",
-                "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+                "status": "Exceeded" if result.total_tokens > TOKENFILE_LIMIT else "OK"
             }
         else:
             # Para outros tipos de arquivo (como PDF), tenta processar como documento
@@ -165,7 +167,7 @@ async def contar_tokens_base64(base64_string: str) -> dict:
                 return {
                     "total_tokens": result.total_tokens,
                     "type": "pdf_text",
-                    "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+                    "status": "Exceeded" if result.total_tokens > TOKENFILE_LIMIT else "OK"
                 }
             else:
                 # Tenta como texto simples
@@ -179,7 +181,7 @@ async def contar_tokens_base64(base64_string: str) -> dict:
                     return {
                         "total_tokens": result.total_tokens,
                         "type": "text",
-                        "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+                        "status": "Exceeded" if result.total_tokens > TOKENFILE_LIMIT else "OK"
                     }
                 except UnicodeDecodeError:
                     raise HTTPException(status_code=400, detail="Formato de arquivo não suportado para contagem de tokens")
@@ -260,7 +262,7 @@ async def contar_tokens_upload_file(file: UploadFile) -> dict:
             return {
                 "total_tokens": result.total_tokens,
                 "type": "image",
-                "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+                "status": "Exceeded" if result.total_tokens > TOKENFILE_LIMIT else "OK"
             }
             
         # Verifica se é um PDF
@@ -280,7 +282,7 @@ async def contar_tokens_upload_file(file: UploadFile) -> dict:
             return {
                 "total_tokens": result.total_tokens,
                 "type": "pdf_text",
-                "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+                "status": "Exceeded" if result.total_tokens > TOKENFILE_LIMIT else "OK"
             }
             
         # Tenta como arquivo de texto
@@ -297,7 +299,7 @@ async def contar_tokens_upload_file(file: UploadFile) -> dict:
                 return {
                     "total_tokens": result.total_tokens,
                     "type": "text",
-                    "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+                    "status": "Exceeded" if result.total_tokens > TOKENFILE_LIMIT else "OK"
                 }
                 
             except UnicodeDecodeError:
@@ -313,7 +315,7 @@ async def contar_tokens_upload_file(file: UploadFile) -> dict:
                         return {
                             "total_tokens": result.total_tokens,
                             "type": f"text_{encoding}",
-                            "status": "Exceeded" if result.total_tokens > 100000 else "OK"
+                            "status": "Exceeded" if result.total_tokens > TOKENFILE_LIMIT else "OK"
                         }
                     except:
                         continue
